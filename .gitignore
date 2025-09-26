@@ -1,0 +1,26 @@
+# Build / bin
+/build/
+/bin/
+/dist/
+/out/
+/*.exe
+/*.dll
+/*.pdb
+
+# VSCode & system
+.vscode/
+*.code-workspace
+.DS_Store
+Thumbs.db
+
+# Raylib cache / temp
+*.obj
+*.o
+*.log
+
+# Lua
+*.luac
+
+# Textures/generated
+*.png~
+*.tmp
