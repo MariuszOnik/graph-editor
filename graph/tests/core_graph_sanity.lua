@@ -3,7 +3,7 @@
 -- tests/core_graph_sanity.lua
 -- Proste sanity testy dla Graph/Node/Port/Link
 
---package.path = package.path .. ";./graph/?.lua;./?.lua"
+package.path = package.path .. ";./graph/?.lua;./?.lua"
 
 local Graph = require("graph.core.graph")
 local Node  = require("graph.core.node")
