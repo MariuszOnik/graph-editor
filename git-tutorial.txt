@@ -1,0 +1,8 @@
+# Utwórz nową gałąź
+git checkout -b feat/core-port-link
+# Dodaj zmiany do indeksu
+git add graph/core/port.lua graph/core/link.lua
+# Zatwierdź zmiany z odpowiednim komunikatem
+git commit -m "feat(core): implement Port (compat) and Link (validation + serialize)"
+# Wypchnij gałąź na zdalne repozytorium i ustaw śledzenie
+git push -u origin feat/core-port-link
