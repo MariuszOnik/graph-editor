@@ -207,14 +207,23 @@ function Graph:addLink(fromNodeId, fromPortName, toNodeId, toPortName)
   local toNode   = assertNodeExists(self, toNodeId,   "to")
 
   local fromPort = getPortByRole(fromNode, "output", fromPortName)
-  local toPort   = getPortByRole(toNode,   "input",  toPortName)
-  if not fromPort then error(("Graph: output port '%s.%s' not found"):format(fromNodeId, tostring(fromPortName))) end
-  if not toPort   then error(("Graph: input port '%s.%s' not found"):format(toNodeId,   tostring(toPortName))) end
+  if not fromPort then
+    error(("Graph: output port '%s.%s' not found"):format(fromNodeId, tostring(fromPortName)))
+  end
+
+  local toPort = getPortByRole(toNode, "input", toPortName)
+  if not toPort then
+    -- jeśli nazwa istnieje jako OUTPUT, doprecyzuj komunikat
+    local maybeOut = toNode:getOutput(toPortName)
+    if maybeOut then
+      error(("Graph: port '%s.%s' exists but is OUTPUT; expected INPUT"):format(toNodeId, tostring(toPortName)))
+    end
+    error(("Graph: input port '%s.%s' not found"):format(toNodeId, tostring(toPortName)))
+  end
 
   validateCanConnect(self, fromNode, fromPort, toNode, toPort)
 
   local link = Link:new(nil, fromNode, fromPort, toNode, toPort)
-  -- rejestracja
   self.linksById[link.id] = link
 
   local f = ensureNode(self.linksFrom, fromNode.id)
@@ -222,10 +231,11 @@ function Graph:addLink(fromNodeId, fromPortName, toNodeId, toPortName)
   table.insert(lf, link)
 
   local t = ensureNode(self.linksTo, toNode.id)
-  t[toPort.name] = link  -- pojedyncze wejście
+  t[toPort.name] = link
 
   return link
 end
+
 
 function Graph:removeLink(linkId)
   local link = self.linksById[linkId]
