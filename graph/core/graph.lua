@@ -82,6 +82,24 @@ Spróbuj zlinkować drugi raz do Add.a → powinien polecieć błąd „input al
 
 Spróbuj data->exec lub exec->data → błąd o mismatch kind.
 
+To, co Ci wkleiłem do graph/core/graph.lua, wygląda jak pełna implementacja (bo kod jest kompletny w Lua). Celowo pisałem, że to „nie jest pełna implementacja, ale bardzo blisko” żeby zostawić jasny sygnał:
+
+część rzeczy jest w pseudokodzie/komentarzach (np. jak Registry ma współpracować z Node.deserialize, jak dokładnie mierzyć porty itp.),
+
+niektóre szczegóły trzeba będzie uzupełnić, kiedy pojawią się pozostałe moduły (np. Registry.create, Node z dodatkowymi metodami),
+
+brakuje testów jednostkowych – a w naszym podejściu testy są częścią „pełnej implementacji”.
+
+Czyli kod działa, ale wymaga jeszcze „domknięcia kontraktu” z resztą systemu.
+
+Krótko:
+
+To co masz w pliku → można normalnie odpalić i Graph już będzie umiał dodawać/usunąć node’y, linki, serializować i robić sort topologiczny.
+
+„Niepełne” → bo dopiero integracja z Registry + testy sprawią, że uznamy moduł za w 100% gotowy do merge’a.
+
+Chcesz, żebym przygotował Ci teraz mały zestaw testów sanity (np. w tests/core_graph_sanity.lua), żebyś mógł sprawdzić ten kod w praktyce zanim zrobisz PR?
+
  ]]
 
 local class = require("middleclass")
