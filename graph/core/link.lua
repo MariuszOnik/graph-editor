@@ -26,9 +26,11 @@ Metody (stub):
 local class = require("middleclass")
 
 -- lokalny generator ID (bez zależności od utils)
+local _link_idc = 0
+
 local function make_id()
-    make_id._c = (make_id._c or 0) + 1
-    return ("l%06d"):format(make_id._c)
+    _link_idc = _link_idc + 1
+    return ("l%06d"):format(_link_idc)
 end
 
 local Link = class("Link")

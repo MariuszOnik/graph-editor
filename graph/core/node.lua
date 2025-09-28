@@ -48,12 +48,13 @@ local class = require("middleclass")
 local Port  = require("graph.core.port")
 
 -- Bezpieczne ID: próbujemy utila, inaczej lokalny inkrement.
+local _node_idc = 0
 local function make_id()
-  local ok, gen = pcall(require, "graph.utils.uuid")
-  if ok and type(gen) == "function" then return gen() end
-  make_id._c = (make_id._c or 0) + 1
-  return ("n%06d"):format(make_id._c)
-end
+   local ok, gen = pcall(require, "graph.utils.uuid")
+   if ok and type(gen) == "function" then return gen() end
+   _node_idc = _node_idc + 1
+   return ("n%06d"):format(_node_idc)
+ end
 
 local VALID_KIND = { data = true, exec = true }
 
