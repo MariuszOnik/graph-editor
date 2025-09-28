@@ -20,7 +20,7 @@ Metody (stub):
 -- graph/core/port.lua
 -- Port (model) — prosty obiekt opisujący złącze węzła.
 
-local class = require("middleclass")
+local class = require("lib.middleclass")
 
 local VALID_KIND = { data = true, exec = true }
 
