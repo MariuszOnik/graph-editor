@@ -23,7 +23,7 @@ Metody (stub):
 -- graph/core/link.lua
 -- Link łączy wyjściowy port (from) z wejściowym (to). Przechowujemy też ID/nazwy do serializacji.
 
-local class = require("middleclass")
+local class = require("lib.middleclass")
 
 -- lokalny generator ID (bez zależności od utils)
 local function make_id()
