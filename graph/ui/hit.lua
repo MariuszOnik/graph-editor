@@ -1,174 +1,217 @@
---[[
-Hit (Hit-testing)
------------------
-Odpowiedzialność:
-- Odpowiada na pytania: "co jest pod kursorem/punktem/obszarem?"
-- Używany przez Controller.
+-- graph/ui/hit.lua
+-- Hit-testing dla edytora grafu: node / port / link / rect.
+-- Zależności: layout (nodeRect/portPosition/linkPolyline/linkAABB/screenToWorld), theme.sizes.
 
-Publiczne API (stub):
-- hitNode(graph, x, y, camera, layout)   -> nodeId|nil
-- hitPort(graph, x, y, camera, layout)   -> {nodeId, portName, kind}|nil
-- hitLink(graph, x, y, camera)           -> linkId|nil
-- hitRect(graph, rectWorld)              -> { nodeIds = {...}, linkIds = {...} }
+local layout  = require("graph.ui.layout")
+local theme   = require("graph.ui.theme")
 
-Uwagi:
-- Współrzędne wejściowe w screen-space; funkcje same przeliczają na world-space albo przyjmują już world.
-]]
+local H = {}
 
---[[
-Hit (Hit-testing)
------------------
-Kontrakty + pseudokod dla detekcji trafień w edytorze grafu.
+-- --- helpers (czysta matematyka) ------------------------------------------
 
-Założenia:
-- Wejście funkcji przyjmuje współrzędne EKRANOWE (screen-space).
-- Layout odpowiada za geometrię i konwersje: screen<->world, nodeRect, portPosition, linkPath, itp.
-- Theme determinuje tolerancję trafienia (np. szerokość linii linku).
-- rshapes* dostarcza prymitywy kolizyjne (point-rect, point-circle, point-line, recs).
+local function S()
+  local s = theme.sizes or theme.metrics or {}
+  return {
+    portRadius     = s.portRadius     or 5,
+    portExecSize   = s.portExecSize   or 10,
+    linkWidth      = s.linkWidth      or 2,
+    hitExtra       = s.hitExtra       or 3,   -- dodatkowy luz dla UX
+  }
+end
 
-Struktury pomocnicze (przykład):
-selection = { nodes = { [nodeId]=true, ... }, links = { [linkId]=true, ... } }
-camera    = { ox:number, oy:number, zoom:number }
-theme     = { sizes = { portRadius=6, portExecSize=10, linkWidth=2 }, ... }
+local function pointInRect(px, py, r)
+  return (px >= r.x) and (px <= r.x + r.w) and (py >= r.y) and (py <= r.y + r.h)
+end
 
-Wydajność:
-- Zawsze rób pre-check AABB zanim wejdziesz w drogie testy (szczególnie linki).
-- Cache’uj wynik aproksymacji krzywej linku do polyline: link._poly = {p0,p1,...}, link._aabb = {x,y,w,h}
-  i unieważniaj przy ruchu node/port (to zrobi później warstwa UI/Renderer).
+local function rectsOverlap(a, b)
+  return not (a.x + a.w < b.x or b.x + b.w < a.x or a.y + a.h < b.y or b.y + b.h < a.y)
+end
 
-API (publiczne):
-- hitNode(graph, x_screen, y_screen, camera, layout)          -> nodeId|nil
-- hitPort(graph, x_screen, y_screen, camera, layout, theme)   -> {nodeId, portName, kind}|nil
-- hitLink(graph, x_screen, y_screen, camera, layout, theme)   -> linkId|nil
-- hitRect(graph, rectWorld, layout)                            -> { nodeIds={...}, linkIds={...} }
-  (Uwaga: hitRect przyjmuje już rect w world-space, bo zwykle pochodzi z box-select liczonego w world.)
-]]
+local function dist2(a, b) -- kwadrat odległości
+  local dx, dy = a.x - b.x, a.y - b.y
+  return dx*dx + dy*dy
+end
 
+-- Odległość punkt–odcinek (a,b) w 2D
+local function pointSegmentDistance(px, py, ax, ay, bx, by)
+  local vx, vy = bx - ax, by - ay
+  local wx, wy = px - ax, py - ay
+  local vv = vx*vx + vy*vy
+  if vv == 0 then
+    local dx, dy = px - ax, py - ay
+    return math.sqrt(dx*dx + dy*dy)
+  end
+  local t = (wx*vx + wy*vy) / vv
+  if t < 0 then t = 0 elseif t > 1 then t = 1 end
+  local cx, cy = ax + t*vx, ay + t*vy
+  local dx, dy = px - cx, py - cy
+  return math.sqrt(dx*dx + dy*dy)
+end
 
--- TODO: wstrzyknij zależności rshapes przez require na górze modułu:
--- local rshapes = require("rshapes")
+local function segmentIntersect(ax, ay, bx, by, cx, cy, dx, dy)
+  local function orient(px, py, qx, qy, rx, ry)
+    return (qy - py) * (rx - qx) - (qx - px) * (ry - qy)
+  end
+  local o1 = orient(ax, ay, bx, by, cx, cy)
+  local o2 = orient(ax, ay, bx, by, dx, dy)
+  local o3 = orient(cx, cy, dx, dy, ax, ay)
+  local o4 = orient(cx, cy, dx, dy, bx, by)
+  if (o1 == 0 and o2 == 0 and o3 == 0 and o4 == 0) then
+    -- kolinearne: sprawdź pokrywanie się proj. na x i y
+    local function between(p, q, r) return math.min(p, r) <= q and q <= math.max(p, r) end
+    return (between(ax, cx, bx) and between(ay, cy, by)) or
+           (between(ax, dx, bx) and between(ay, dy, by)) or
+           (between(cx, ax, dx) and between(cy, ay, dy)) or
+           (between(cx, bx, dx) and between(cy, by, dy))
+  end
+  return (o1 == 0 or o2 == 0 or (o1 > 0) ~= (o2 > 0)) and
+         (o3 == 0 or o4 == 0 or (o3 > 0) ~= (o4 > 0))
+end
 
+local function segmentIntersectsRect(ax, ay, bx, by, r)
+  if pointInRect(ax, ay, r) or pointInRect(bx, by, r) then return true end
+  local x0, y0 = r.x, r.y
+  local x1, y1 = r.x + r.w, r.y + r.h
+  return segmentIntersect(ax, ay, bx, by, x0, y0, x1, y0) or
+         segmentIntersect(ax, ay, bx, by, x1, y0, x1, y1) or
+         segmentIntersect(ax, ay, bx, by, x1, y1, x0, y1) or
+         segmentIntersect(ax, ay, bx, by, x0, y1, x0, y0)
+end
 
---[[
-hitNode
--------
-Cel: zwrócić ID pierwszego (najwyższego) noda pod kursorem.
+-- --- API: hitNode ----------------------------------------------------------
 
-Kroki:
-1) Przelicz punkt ekranu na świat:
-   local wx, wy = layout.screenToWorld(camera, x_screen, y_screen)
-2) Iteruj po nodach w kolejności od "góry" (jeśli masz Z-order; jeśli nie, w odwrotnej kolejności dodawania).
-3) Dla każdego noda:
-   - local rect = layout.nodeRect(node)  -- {x,y,w,h} w world
-   - if rshapes.CheckCollisionPointRec({x=wx,y=wy}, rect) then return node.id end
-4) Jeśli nic nie trafiono -> nil.
-]]
-function hitNode(graph, x_screen, y_screen, camera, layout)
-  -- stub
+-- Zwraca id najwyższego noda pod kursorem (screen-space -> world).
+function H.hitNode(graph, x_screen, y_screen, camera, _layout)
+  if not (graph and graph.nodes) then return nil end
+  local wx, wy = layout.screenToWorld(camera, x_screen, y_screen)
+  -- iteruj od góry (ostatni rysowany = najwyższy)
+  for i = #graph.nodes, 1, -1 do
+    local node = graph.nodes[i]
+    local r = layout.nodeRect(node)
+    if pointInRect(wx, wy, r) then
+      return node.id or node.uid or node.name or i
+    end
+  end
   return nil
 end
 
+-- --- API: hitPort ----------------------------------------------------------
 
---[[
-hitPort
--------
-Cel: znaleźć port (data/exec) pod kursorem.
+-- Zwraca {nodeId, portName, kind ("data"|"exec"), side ("in"|"out"), index} lub nil
+function H.hitPort(graph, x_screen, y_screen, camera, _layout, _theme)
+  if not (graph and graph.nodes) then return nil end
+  local s = S()
+  local wx, wy = layout.screenToWorld(camera, x_screen, y_screen)
 
-Kroki:
-1) (wx,wy) = screen->world
-2) Dla każdego node:
-   - Pobierz listę portów: node.inputs + node.outputs
-   - Dla każdego portu:
-     * local px, py = layout.portPosition(node, port) -- środek portu (world)
-     * jeśli port.kind == "data":
-         - promień = theme.sizes.portRadius (np. 6)
-         - if rshapes.CheckCollisionPointCircle({x=wx,y=wy}, {x=px,y=py}, promień) -> trafiony
-     * jeśli port.kind == "exec":
-         - zdefiniuj mały rect wokół (px,py): np. {x=px-s/2, y=py-s/2, w=s, h=s}, gdzie s=theme.sizes.portExecSize
-         - if rshapes.CheckCollisionPointRec({x=wx,y=wy}, rect) -> trafiony
-   - Zwróć pierwsze trafienie: { nodeId=node.id, portName=port.name, kind=port.kind }
-3) Jeśli nic -> nil.
-]]
-function hitPort(graph, x_screen, y_screen, camera, layout, theme)
-  -- stub
+  -- od najwyższego noda
+  for i = #graph.nodes, 1, -1 do
+    local node = graph.nodes[i]
+
+    local function testPorts(ports, side)
+      if not ports then return nil end
+      for idx, port in ipairs(ports) do
+        local p = { __side = side, __index = idx, name = port.name, kind = port.kind }
+        local px, py = layout.portPosition(node, p)
+        local kind = (port.kind == "exec") and "exec" or "data"
+        if kind == "data" then
+          if dist2({x=wx,y=wy}, {x=px,y=py}) <= (s.portRadius * s.portRadius) then
+            return { nodeId = node.id, portName = port.name, kind = "data", side = side, index = idx }
+          end
+        else
+          local half = s.portExecSize * 0.5
+          local r = { x = px - half, y = py - half, w = s.portExecSize, h = s.portExecSize }
+          if pointInRect(wx, wy, r) then
+            return { nodeId = node.id, portName = port.name, kind = "exec", side = side, index = idx }
+          end
+        end
+      end
+      return nil
+    end
+
+    -- najpierw porty (żeby miały priorytet nad tłem nody)
+    local hit = testPorts(node.inputs, "in") or testPorts(node.outputs, "out")
+    if hit then return hit end
+  end
+
   return nil
 end
 
+-- --- API: hitLink ----------------------------------------------------------
 
---[[
-hitLink
--------
-Cel: kliknięcie w link (krzywa Beziera albo polilinia).
+-- Zwraca linkId|nil
+function H.hitLink(graph, x_screen, y_screen, camera, _layout, _theme)
+  if not (graph and graph.links) then return nil end
+  local s = S()
+  local wx, wy = layout.screenToWorld(camera, x_screen, y_screen)
+  local tol = (s.linkWidth * 0.6) + s.hitExtra
 
-Kroki:
-1) (wx,wy) = screen->world
-2) Zdefiniuj tolerancję trafienia:
-   local tol = (theme.sizes.linkWidth or 2) * 0.6 + 3   -- UX-friendly
-3) Iteruj po linkach:
-   - Szybki pre-check AABB:
-     * local aabb = link._aabb or layout.linkAABB(link, graph)  -- jeśli masz taką funkcję; w przeciwnym razie policz z polyline
-     * jeżeli aabb i rshapes.CheckCollisionPointRec({x=wx,y=wy}, aabb) == false -> pomiń
-   - Weź polyline:
-     * local poly = link._poly
-     * jeśli brak cache: poly = layout.linkPolyline(link, graph) i opcjonalnie policz/cachuj AABB
-   - Iteruj segmenty polyline: (p[i], p[i+1])
-     * if rshapes.CheckCollisionPointLine({x=wx,y=wy}, p[i], p[i+1], tol) -> return link.id
-4) Jeśli nic -> nil.
+  for i = #graph.links, 1, -1 do
+    local link = graph.links[i]
 
-Uwaga:
-- Jeśli nie masz jeszcze layout.linkPolyline, możesz:
-  * wziąć (p0,c0,c1,p1) = layout.linkPath(link, graph)
-  * zasamplować Bezier w N równych krokach (np. N=16) do polyline.
-- Cache link._poly musi być unieważniany przy:
-  * ruchu któregokolwiek z końców portów albo zmianie geometrii nody.
-]]
-function hitLink(graph, x_screen, y_screen, camera, layout, theme)
-  -- stub
+    -- AABB pre-check (z tolerancją)
+    local aabb = link._aabb or layout.linkAABB(link, graph)
+    if aabb then
+      local expanded = { x = aabb.x - tol, y = aabb.y - tol, w = aabb.w + 2*tol, h = aabb.h + 2*tol }
+      if not pointInRect(wx, wy, expanded) then goto continue end
+    end
+
+    -- Polyline (cache lub licz)
+    local poly = link._poly or layout.linkPolyline(link, graph, nil, {segments=16})
+    if #poly >= 2 then
+      for j = 1, #poly - 1 do
+        local a, b = poly[j], poly[j+1]
+        local d = pointSegmentDistance(wx, wy, a.x, a.y, b.x, b.y)
+        if d <= tol then
+          return link.id or i
+        end
+      end
+    end
+
+    ::continue::
+  end
+
   return nil
 end
 
+-- --- API: hitRect ----------------------------------------------------------
 
---[[
-hitRect
--------
-Cel: zaznaczenie obszarem (box select). Przyjmujemy rect w world-space.
+-- Zaznaczenie obszarem (rect w world-space).
+-- Zwraca { nodeIds = {...}, linkIds = {...} }
+function H.hitRect(graph, rectWorld, _layout)
+  local out = { nodeIds = {}, linkIds = {} }
+  if not graph then return out end
 
-Parametry:
-- rectWorld = { x, y, w, h } (world)
+  -- Nody
+  if graph.nodes then
+    for _, node in ipairs(graph.nodes) do
+      local r = layout.nodeRect(node)
+      if rectsOverlap(r, rectWorld) then
+        table.insert(out.nodeIds, node.id)
+      end
+    end
+  end
 
-Kroki:
-1) Zainicjalizuj wyniki: res = { nodeIds={}, linkIds={} }
-2) Nody:
-   - dla każdego noda:
-     * local r = layout.nodeRect(node)
-     * jeśli rshapes.CheckCollisionRecs(r, rectWorld) -> table.insert(res.nodeIds, node.id)
-3) Linki (opcjonalnie – droższe):
-   - Szybki pre-check: aabb linku vs rectWorld → jeśli brak przecięcia, pomiń.
-   - Wykonaj „gęstość punktów testowych” lub szybkie heurystyki:
-     * sprawdź, czy któryś z segmentów polyline przecina granice recta:
-       - np. testuj „segment vs każda krawędź recta” za pomocą rshapes.CheckCollisionLines
-       - lub několka punktów wewnątrz recta: jeżeli point-line <= tol dla któregokolwiek segmentu → trafienie
-   - Jeśli trafiony → table.insert(res.linkIds, link.id)
-4) Zwróć res.
-]]
-function hitRect(graph, rectWorld, layout)
-  -- stub
-  return { nodeIds = {}, linkIds = {} }
+  -- Linki (opcjonalnie droższe, więc tylko jeśli są)
+  if graph.links then
+    for _, link in ipairs(graph.links) do
+      local aabb = link._aabb or layout.linkAABB(link, graph)
+      if aabb and rectsOverlap(aabb, rectWorld) then
+        local poly = link._poly or layout.linkPolyline(link, graph, nil, {segments=16})
+        -- heurystyka: czy któryś segment wchodzi w rect
+        local hit = false
+        for i = 1, #poly - 1 do
+          local a, b = poly[i], poly[i+1]
+          if segmentIntersectsRect(a.x, a.y, b.x, b.y, rectWorld) then
+            hit = true
+            break
+          end
+        end
+        if hit then table.insert(out.linkIds, link.id) end
+      end
+    end
+  end
+
+  return out
 end
 
-
---[[
-Pomocnicze zalecenia (do implementacji później):
-- Priorytety trafienia: port > link > node (albo node > port — wybierz i trzymaj spójnie).
-- Warstwa "Editor" może robić multi-hit: wywołać najpierw hitPort, jak nil to hitLink, jak nil to hitNode.
-- Kolejność iteracji: jeżeli masz pojęcie Z-order, iteruj od najwyższego.
-- Wszystkie liczby (tol, rozmiary) bierz z theme.sizes; nie zostawiaj „magicznych stałych” w kodzie.
-- Funkcje layoutu:
-  * screenToWorld(camera, sx, sy) -> wx, wy
-  * nodeRect(node) -> {x,y,w,h}
-  * portPosition(node, port) -> {x,y}
-  * linkPath(link, graph) -> {p0,c0,c1,p1}  -- jeżeli używasz Beziera
-  * linkPolyline(link, graph) -> { {x,y}, ... }  -- aproksymacja; N=12..24
-  * linkAABB(link, graph) -> {x,y,w,h}  -- jeśli nie policzysz, da się wyznaczyć z polyline
-]]
-
+return H

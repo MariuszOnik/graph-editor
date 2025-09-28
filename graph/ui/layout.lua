@@ -1,252 +1,255 @@
---[[
-Layout
-------
-Odpowiedzialność:
-- Geometria nodów i portów: oblicza pozycje portów, rect-y, punkty zaczepienia linków.
+-- graph/ui/layout.lua
+-- Czysty layout: geometria i transformacje (bez rysowania).
+-- Utrzymuje kompatybilność wstecz: aliasy node_rect/port_local_pos/link_polyline.
 
-Publiczne API (stub):
-- nodeRect(node) -> {x,y,w,h}
-- portPosition(node, port) -> {x,y} (world-space)
-- linkPath(link, graph) -> {p0, p1, c0, c1}  -- np. krzywa Beziera
-- worldToScreen(camera, x,y) / screenToWorld(camera, x,y)
+local L = {}
 
-Uwagi:
-- Zero rysowania; tylko matematyka/położenia.
-]]
+----------------------------------------------------------------
+-- Konfiguracja / Theme
+----------------------------------------------------------------
+local theme = require("graph.ui.theme")
 
-
---[[
-Layout
-------
-Cel: wszystkie obliczenia geometrii edytora (bez rysowania).
-Zero zależności od runtime/UI — czysta matematyka.
-
-Kamera / układ współrzędnych
-- "world"  = układ roboczy grafu (pozycje nodów, portów)
-- "screen" = piksele okna (po zoom/pan)
-- camera = { ox:number, oy:number, zoom:number }
-  gdzie (ox,oy) to przesunięcie świata względem ekranu (pan),
-  a zoom > 0 (1.0 = 100%).
-
-Konfiguracja layoutu
-- theme: dostarcza metryki (rozmiary nodów, portów, spacing)
-- Reużyj pola z theme.sizes, np.:
-  nodePaddingX, nodePaddingY,
-  portRadius (dla data), portExecSize (dla exec),
-  rowHeight, headerHeight, linkWidth, gridSize
-
-API (publiczne)
-- worldToScreen(camera, wx, wy) -> sx, sy
-- screenToWorld(camera, sx, sy) -> wx, wy
-- nodeRect(node, theme) -> { x, y, w, h }           -- w world
-- portPosition(node, port, theme) -> { x, y }       -- w world (środek portu)
-- linkPath(link, graph, theme) -> { p0, c0, c1, p1 } -- punkty dla krzywej Beziera
-- linkPolyline(link, graph, theme, opts) -> { {x,y}, ... } -- aproksymacja krzywej
-- linkAABB(link, graph, theme, opts) -> { x, y, w, h }
-- snapToGrid(wx, wy, gridSize) -> gx, gy
-
-Ustalenia:
-- porty wejściowe (inputs) po lewej, wyjściowe (outputs) po prawej nodzie (domyślnie).
-- porty exec (prostokąt) po „górze/dole” węzła lub nad/pod listą — decyzję trzymamy spójnie.
-- node posiada: node.x, node.y (lewy–górny róg world), node.w?, node.h? (opcjonalnie; gdy brak → liczymy z treści/portów).
-- port posiada: port.name, port.kind ("data"|"exec"), port.side? (opcjonalnie wymusza stronę).
-
-Wydajność:
-- Cache’uj wyniki (np. node._rect, link._poly, link._aabb) i unieważniaj przy zmianach.
-]]
-
-
---[[
-worldToScreen / screenToWorld
------------------------------
-Formuły (proste 2D bez obrotów):
-sx = (wx * zoom) + ox
-sy = (wy * zoom) + oy
-wx = (sx - ox) / zoom
-wy = (sy - oy) / zoom
-]]
-local function worldToScreen(camera, wx, wy)
-  -- stub
-  return 0, 0
+local function sizes()
+  -- Wymagane pola w theme.sizes (z sensownymi fallbackami):
+  local s = theme.sizes or theme.metrics or {}
+  return {
+    nodeMinW       = s.nodeMinW       or 140,
+    nodePaddingX   = s.nodePaddingX   or 10,
+    nodePaddingY   = s.nodePaddingY   or 8,
+    rowHeight      = s.rowHeight      or 22,
+    headerHeight   = s.headerHeight   or 28,
+    portRadius     = s.portRadius     or 5,   -- data port (circle)
+    portExecSize   = s.portExecSize   or 10,  -- exec port (square)
+    bezierMinTx    = s.bezierMinTx    or 40,
+    bezierMaxTx    = s.bezierMaxTx    or 200,
+    bezierTensionY = s.bezierTensionY or 0,
+    gridSize       = s.gridSize       or 16,
+  }
 end
 
-local function screenToWorld(camera, sx, sy)
-  -- stub
-  return 0, 0
+----------------------------------------------------------------
+-- Kamera / transformacje
+----------------------------------------------------------------
+-- camera = { ox, oy, zoom }
+local function _ensureCam(camera)
+  local z = (camera and camera.zoom) or 1
+  return {
+    ox = (camera and camera.ox) or 0,
+    oy = (camera and camera.oy) or 0,
+    zoom = (z == 0) and 1 or z
+  }
 end
 
-
---[[
-nodeRect
---------
-Zwraca prostokąt w world-space dla nody.
-
-Wejście:
-- node: { x, y, w?, h?, title?, inputs:[], outputs:[], execIn?:[], execOut?:[] }
-- theme: sizes.nodeMinW, sizes.nodePaddingX/Y, sizes.rowHeight, sizes.headerHeight, sizes.portGap
-
-Pseudokod:
-1) width:
-   - Jeżeli node.w podany → użyj.
-   - W przeciwnym razie minimum: sizes.nodeMinW.
-   - (opcjonalnie: dopasuj do najdłuższej etykiety portu)
-2) height:
-   - header = sizes.headerHeight
-   - rows   = max(#inputs, #outputs) * sizes.rowHeight
-   - execRows (opcjonalnie) = (#execIn > 0 and rowHeight or 0) + (#execOut > 0 and rowHeight or 0)
-   - h = header + rows + execRows + 2 * sizes.nodePaddingY
-3) w = max(node.w or minW, minW) + 2 * sizes.nodePaddingX
-4) return { x=node.x, y=node.y, w=w, h=h }
-]]
-local function nodeRect(node, theme)
-  -- stub
-  return { x=0, y=0, w=0, h=0 }
+-- API: worldToScreen(camera, wx, wy) -> sx, sy
+function L.worldToScreen(camera, wx, wy)
+  local cam = _ensureCam(camera)
+  local sx = (wx * cam.zoom) + cam.ox
+  local sy = (wy * cam.zoom) + cam.oy
+  return sx, sy
 end
 
-
---[[
-portPosition
-------------
-Pozycja środka portu (world). Zakładamy dwa pionowe „słupki” portów data:
-- inputs (po lewej krawędzi nody)
-- outputs (po prawej krawędzi nody)
-Porty exec (jeśli używamy góra/dół) — wg osobnej reguły.
-
-Wejście:
-- node, port, theme
-- użyj nodeRect(node, theme)
-
-Pseudokod:
-1) local r = nodeRect(node, theme)
-2) jeśli port.kind == "data":
-   - wyznacz indeks w kolumnie (np. i dla inputs lub j dla outputs)
-   - y = r.y + sizes.headerHeight + sizes.nodePaddingY + index * sizes.rowHeight + sizes.rowHeight/2
-   - jeśli port jest input:
-       x = r.x  -- docelowo środek portu będzie lekko „na zewnątrz” krawędzi
-       x = x - sizes.portRadius  (jeśli chcemy „odstawić” kółko w lewo)
-     jeśli port jest output:
-       x = r.x + r.w
-       x = x + sizes.portRadius
-3) jeśli port.kind == "exec":
-   - np. execIn: w linii pod headerem (nad data)
-     y = r.y + sizes.headerHeight/2  (lub dedykowana wysokość)
-     x = r.x + (r.w * t), gdzie t∈[0..1] zależnie od pozycji/indeksu exec portu
-   - analogicznie execOut: w dole nody
-4) return { x, y }
-]]
-local function portPosition(node, port, theme)
-  -- stub
-  return { x=0, y=0 }
-end
-
-
---[[
-linkPath
---------
-Zwraca punkty do krzywej Beziera 2D: p0 (start), c0, c1, p1 (end).
-- p0 = pozycja portu źródłowego (output)
-- p1 = pozycja portu docelowego (input)
-- c0, c1 = kontrolne — bazują na dystansie poziomym i małym offsetcie pionowym.
-
-Wejście:
-- link: { fromNode, fromPort, toNode, toPort }
-- graph: by pobrać referencje do nodów/portów
-- theme: wpływ na „siłę” wybrzuszenia (sizes.bezierTensionX, sizes.bezierTensionY)
-
-Pseudokod:
-1) p0 = portPosition(fromNode, fromPort)
-2) p1 = portPosition(toNode, toPort)
-3) dx = |p1.x - p0.x|
-   tx = clamp(dx * 0.5, min=40, max=200)  -- min/max możesz trzymać w theme
-   c0 = { x = p0.x + tx, y = p0.y }
-   c1 = { x = p1.x - tx, y = p1.y }
-4) (opcjonalnie) dorzuć lekki offset Y zależny od różnicy wysokości:
-   c0.y = c0.y + sign(p1.y - p0.y) * sizes.bezierTensionY
-   c1.y = c1.y - sign(p1.y - p0.y) * sizes.bezierTensionY
-5) return { p0, c0, c1, p1 }
-]]
-local function linkPath(link, graph, theme)
-  -- stub
-  return { {x=0,y=0}, {x=0,y=0}, {x=0,y=0}, {x=0,y=0} }
-end
-
-
---[[
-linkPolyline
-------------
-Aproksymuje krzywą Beziera polyline’em (lista punktów).
-Przydaje się do hit-testu (point-line) i do rysowania bez funkcji krzywych.
-
-Wejście:
-- opts: { segments?:number }  -- domyślnie 16..24
-Pseudokod:
-1) local path = linkPath(link, graph, theme)
-2) N = opts.segments or 16
-3) for i=0..N:
-     t = i / N
-     B(t) = (1-t)^3*p0 + 3(1-t)^2*t*c0 + 3(1-t)*t^2*c1 + t^3*p1  -- (osobno x i y)
-     table.insert(poly, {x=Bx, y=By})
-4) return poly
-]]
-local function linkPolyline(link, graph, theme, opts)
-  -- stub
-  return {}
-end
-
-
---[[
-linkAABB
---------
-Axis-Aligned Bounding Box polyline’u (szybki pre-check kolizji).
-Pseudokod:
-1) local poly = link._poly or linkPolyline(...)
-2) minx,miny = +inf ; maxx,maxy = -inf
-3) for p in poly: minx=min(minx,p.x) ... maxy=...
-4) return { x=minx, y=miny, w=maxx-minx, h=maxy-miny }
-]]
-local function linkAABB(link, graph, theme, opts)
-  -- stub
-  return { x=0, y=0, w=0, h=0 }
-end
-
-
---[[
-snapToGrid
-----------
-Zaokrąglenie punktu world do siatki.
-gx = round(wx / grid) * grid
-gy = round(wy / grid) * grid
-]]
-local function snapToGrid(wx, wy, gridSize)
-  -- stub
+-- API: screenToWorld(camera, sx, sy) -> wx, wy
+function L.screenToWorld(camera, sx, sy)
+  local cam = _ensureCam(camera)
+  local wx = (sx - cam.ox) / cam.zoom
+  local wy = (sy - cam.oy) / cam.zoom
   return wx, wy
 end
 
+----------------------------------------------------------------
+-- Node geometry
+----------------------------------------------------------------
+-- Wspierane pola node:
+-- node.x, node.y, node.w?, node.h?, node.title?
+-- node.inputs (array), node.outputs (array)
+-- (opcjonalnie) node.execIn (array), node.execOut (array)
+-- -> Zwraca {x,y,w,h} w world-space
+function L.nodeRect(node, _theme)
+  local s = sizes()
+  local x = node.x or (node.pos and node.pos.x) or 0
+  local y = node.y or (node.pos and node.pos.y) or 0
 
---[[
-Uwagi implementacyjne:
-- Zwracaj TYLKO liczby / tabele liczb — zero obiektów UI/raylib w tym module.
-- Nie czytaj bezpośrednio z rcore/rtext/rshapes — layout to czysta matematyka,
-  dzięki temu łatwo testować bez okna.
-- Współpracuj z Theme: żadnych „magicznych stałych”. Wszystkie rozmiary i odstępy z theme.sizes.
-- Jeżeli node ma dynamiczne wymiary (np. zależne od tekstu), przekaż preliczone w node (node.measuredW/H)
-  albo zapewnij funkcję „measureNode(node, theme)” w innym module, a layout tylko to wykorzysta.
-- Caching:
-  * node._rect → unieważnij przy zmianie node.x/y/w/h lub zmianie portów
-  * link._poly, link._aabb → unieważnij przy zmianie pozycji któregokolwiek końca
+  -- width
+  local minW = s.nodeMinW + 2 * s.nodePaddingX
+  local w = node.w or (node.size and node.size.w) or minW
+  if w < minW then w = minW end
 
-Eksport API:
-Zdecyduj, czy zwracamy pojedynczą tabelę z funkcjami, np.:
+  -- rows (data)
+  local inCount  = (node.inputs  and #node.inputs)  or 0
+  local outCount = (node.outputs and #node.outputs) or 0
+  local rows = math.max(inCount, outCount)
 
-local M = {
-  worldToScreen = worldToScreen,
-  screenToWorld = screenToWorld,
-  nodeRect      = nodeRect,
-  portPosition  = portPosition,
-  linkPath      = linkPath,
-  linkPolyline  = linkPolyline,
-  linkAABB      = linkAABB,
-  snapToGrid    = snapToGrid,
-}
-return M
-]]
+  -- exec wiersze (opcjonalnie – można pominąć, jeśli exec-y rysujesz w kolumnach)
+  local execH = 0
+  if node.execIn  and #node.execIn  > 0 then execH = execH + s.rowHeight end
+  if node.execOut and #node.execOut > 0 then execH = execH + s.rowHeight end
+
+  local h = s.headerHeight + (rows * s.rowHeight) + execH + 2 * s.nodePaddingY
+  -- explicit height ma prio
+  if node.h or (node.size and node.size.h) then
+    h = node.h or (node.size and node.size.h) or h
+  end
+
+  return { x = x, y = y, w = w, h = h }
+end
+
+----------------------------------------------------------------
+-- Port position (world-space, center)
+----------------------------------------------------------------
+-- port: tabela portu albo wskaźnik na stronę/indeks.
+-- Konwencja:
+--  - jeśli port.__side == "in"/"out" i port.__index podane → użyj ich,
+--  - w innym wypadku spróbuj znaleźć indeks portu w node.inputs / node.outputs,
+--  - data porty w kolumnach: inputs lewa krawędź, outputs prawa krawędź.
+local function _findPortSideIndex(node, port)
+  if port.__side and port.__index then
+    return port.__side, port.__index
+  end
+  -- Szukamy po referencji lub po nazwie
+  if node.inputs then
+    for i, p in ipairs(node.inputs) do
+      if p == port or (port.name and p.name == port.name) then
+        return "in", i
+      end
+    end
+  end
+  if node.outputs then
+    for i, p in ipairs(node.outputs) do
+      if p == port or (port.name and p.name == port.name) then
+        return "out", i
+      end
+    end
+  end
+  -- fallback: załóż output #1
+  return "out", 1
+end
+
+-- Zwraca {x,y} środka portu (world).
+function L.portPosition(node, port, _theme)
+  local s = sizes()
+  local r = L.nodeRect(node, _theme)
+  local side, idx = _findPortSideIndex(node, port)
+
+  -- Y: wiersze data zaczynają się pod headerem
+  local baseY = r.y + s.headerHeight + s.nodePaddingY
+  local cy    = baseY + (idx - 0.5) * s.rowHeight
+
+  -- X: lewa/prawa krawędź (z lekkim wyprowadzeniem „na zewnątrz”)
+  if side == "in" then
+    return (r.x - s.portRadius), cy
+  else
+    return (r.x + r.w + s.portRadius), cy
+  end
+end
+
+----------------------------------------------------------------
+-- Link path (cubic Bezier)
+----------------------------------------------------------------
+-- link: { fromNode, fromPort, toNode, toPort } (port może być obiektem z name/kind)
+-- Zwraca { p0, c0, c1, p1 } (każdy {x,y})
+function L.linkPath(link, graph, _theme)
+  local s = sizes()
+  local fromNode = link.fromNode or (graph and graph:getNodeById(link.from))
+  local toNode   = link.toNode   or (graph and graph.getNodeById and graph:getNodeById(link.to))
+  if not (fromNode and toNode) then
+    return { {x=0,y=0},{x=0,y=0},{x=0,y=0},{x=0,y=0} }
+  end
+
+  local p0x, p0y = L.portPosition(fromNode, link.fromPort or { __side="out", __index=link.fromSlot or 1 })
+  local p1x, p1y = L.portPosition(toNode,   link.toPort   or { __side="in",  __index=link.toSlot   or 1 })
+
+  local dx = math.abs(p1x - p0x)
+  local tx = math.max(s.bezierMinTx, math.min(s.bezierMaxTx, dx * 0.5))
+
+  local c0x, c0y = p0x + tx, p0y
+  local c1x, c1y = p1x - tx, p1y
+
+  if s.bezierTensionY ~= 0 then
+    local sign = (p1y >= p0y) and 1 or -1
+    c0y = c0y + sign * s.bezierTensionY
+    c1y = c1y - sign * s.bezierTensionY
+  end
+
+  return { {x=p0x,y=p0y}, {x=c0x,y=c0y}, {x=c1x,y=c1y}, {x=p1x,y=p1y} }
+end
+
+----------------------------------------------------------------
+-- Bezier sampling -> polyline
+----------------------------------------------------------------
+local function _bezierPoint(p0, c0, c1, p1, t)
+  local u = 1 - t
+  local x = (u*u*u)*p0.x + 3*(u*u)*t*c0.x + 3*u*(t*t)*c1.x + (t*t*t)*p1.x
+  local y = (u*u*u)*p0.y + 3*(u*u)*t*c0.y + 3*u*(t*t)*c1.y + (t*t*t)*p1.y
+  return x, y
+end
+
+-- Zwraca listę punktów { {x,y}, ... }
+function L.linkPolyline(link, graph, _theme, opts)
+  opts = opts or {}
+  local seg = math.max(2, opts.segments or 16)
+  local path = L.linkPath(link, graph, _theme)
+  local p0, c0, c1, p1 = path[1], path[2], path[3], path[4]
+
+  local poly = {}
+  for i = 0, seg do
+    local t = i / seg
+    local x, y = _bezierPoint(p0, c0, c1, p1, t)
+    poly[#poly+1] = { x = x, y = y }
+  end
+  return poly
+end
+
+----------------------------------------------------------------
+-- Polyline AABB
+----------------------------------------------------------------
+function L.linkAABB(link, graph, _theme, opts)
+  local poly = (link._poly and not opts) and link._poly or L.linkPolyline(link, graph, _theme, opts)
+  if #poly == 0 then return { x=0, y=0, w=0, h=0 } end
+  local minx, miny = math.huge, math.huge
+  local maxx, maxy = -math.huge, -math.huge
+  for _,p in ipairs(poly) do
+    if p.x < minx then minx = p.x end
+    if p.y < miny then miny = p.y end
+    if p.x > maxx then maxx = p.x end
+    if p.y > maxy then maxy = p.y end
+  end
+  return { x = minx, y = miny, w = (maxx - minx), h = (maxy - miny) }
+end
+
+----------------------------------------------------------------
+-- Grid
+----------------------------------------------------------------
+function L.snapToGrid(wx, wy, gridSize)
+  local g = gridSize or sizes().gridSize
+  local gx = math.floor((wx / g) + 0.5) * g
+  local gy = math.floor((wy / g) + 0.5) * g
+  return gx, gy
+end
+
+----------------------------------------------------------------
+-- Alias’y wsteczne (z pliku, który już miałeś)
+----------------------------------------------------------------
+-- Lokalna pozycja portu była kiedyś obliczana „względem nody” – teraz zwracamy world.
+-- Jeśli ktoś oczekuje local, może odjąć r.x/r.y.
+function L.node_rect(node, _theme)
+  return L.nodeRect(node, _theme)
+end
+
+function L.port_local_pos(node, slot_index, is_output, _theme)
+  -- Zbuduj tymczasowy „port” tak jak oczekiwał stary kod.
+  local side  = is_output and "out" or "in"
+  local port  = { __side = side, __index = slot_index }
+  local x, y  = L.portPosition(node, port, _theme)
+  local r     = L.nodeRect(node, _theme)
+  return { x = x - r.x, y = y - r.y }
+end
+
+function L.link_polyline(fromNode, fromSlot, toNode, toSlot, opts)
+  local link = {
+    fromNode = fromNode, fromPort = { __side="out", __index=fromSlot },
+    toNode   = toNode,   toPort   = { __side="in",  __index=toSlot  },
+  }
+  return L.linkPolyline(link, nil, nil, opts)
+end
+
+return L
